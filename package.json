@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "dependencies": {
+    "@vercel/kv": "^3.0.0",
+    "next": "14.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "20.11.24",
+    "typescript": "5.3.3"
+  }
+}
