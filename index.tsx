@@ -65,7 +65,7 @@ interface PendingChat {
     adminReplied: boolean;
 }
 
-// --- MOCK DATA (Fallback for first load) ---
+// --- MOCK DATA (Fallback for first load or if API fails) ---
 const mockUsers: User[] = [
     { id: 1, username: 'admin', password: 'password', role: 'Admin' },
     { id: 2, username: 'security', password: 'password', role: 'Security' },
@@ -104,12 +104,12 @@ function getAi() {
     return ai;
 }
 
-// --- DATA PERSISTENCE (LOCALSTORAGE) ---
+// --- DATA PERSISTENCE (SERVER) ---
 let saveTimeout: number;
 
 function debounceSave() {
     clearTimeout(saveTimeout);
-    saveTimeout = window.setTimeout(() => {
+    saveTimeout = window.setTimeout(async () => {
         if (!state.isAuthenticated) return;
 
         try {
@@ -121,10 +121,20 @@ function debounceSave() {
                 pendingChats: state.pendingChats,
                 sessions: state.sessions,
             };
-            localStorage.setItem('resiGuardData', JSON.stringify(dataToSave));
-            console.log("Data saved to localStorage.");
+
+            const response = await fetch('/api/data', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(dataToSave),
+            });
+
+            if (!response.ok) {
+                throw new Error(`Server responded with ${response.status}`);
+            }
+
+            console.log("Data saved to server.");
         } catch (error) {
-            console.error("Failed to save data to localStorage:", error);
+            console.error("Failed to save data to server:", error);
             // In a real app, you might want to show a toast notification to the user
         }
     }, 1500); // Debounce for 1.5 seconds
@@ -147,14 +157,14 @@ function getSessionUser(): User | null {
     const sessionId = sessionStorage.getItem('sessionId');
     if (!sessionId) return null;
 
-    // Use state.sessions which is populated from localStorage
+    // Use state.sessions which is populated from the server/mocks
     const userId = state.sessions[sessionId];
     if (!userId) {
         sessionStorage.removeItem('sessionId'); // Clean up stale session
         return null;
     }
     
-    // Use state.users which is populated from localStorage
+    // Use state.users which is populated from the server/mocks
     return state.users.find(u => u.id === userId) || null;
 }
 
@@ -215,13 +225,13 @@ function setState(newState: Partial<typeof state>) {
 
     render();
 
-    // List of state keys that should be persisted to localStorage.
+    // List of state keys that should be persisted to the server.
     const keysToPersist = ['visitors', 'users', 'companyInfo', 'predefinedUnits', 'pendingChats', 'sessions'];
     
     // Check if any of the persisted keys have actually changed.
     const hasPersistentChange = keysToPersist.some(key =>
         // @ts-ignore
-        newState.hasOwnProperty(key) && newState[key] !== oldState[key]
+        newState.hasOwnProperty(key) && JSON.stringify(newState[key]) !== JSON.stringify(oldState[key])
     );
 
     if (hasPersistentChange && state.isAuthenticated) {
@@ -241,11 +251,12 @@ function logActivity(message: string) {
 }
 
 // --- EVENT HANDLERS ---
-function initializeUserSession(user: User) {
-    const pendingVisitorsExist = state.visitors.some(v => v.status === 'Pending');
+function initializeUserSession(user: User, dataContext?: any) {
+    const context = dataContext || state;
+    const pendingVisitorsExist = context.visitors.some(v => v.status === 'Pending');
     const shouldShowApprovalModal = ['Admin', 'Officer'].includes(user.role) && pendingVisitorsExist;
     
-    const pendingChats = state.pendingChats;
+    const pendingChats = context.pendingChats;
     const pendingChatsExist = pendingChats.some(c => !c.dismissed);
     const shouldShowChatModal = ['Admin', 'Officer'].includes(user.role) && pendingChatsExist;
     
@@ -1940,22 +1951,30 @@ function attachEventListeners() {
     attachGridEventListeners();
 }
 
-function init() {
+async function init() {
+    setState({ isLoadingData: true });
     let finalStateUpdate: Partial<typeof state>;
-    try {
-        const savedDataJSON = localStorage.getItem('resiGuardData');
-        const data = savedDataJSON ? JSON.parse(savedDataJSON) : null;
 
+    try {
+        const response = await fetch('/api/data');
+        if (!response.ok) {
+            throw new Error(`Server responded with ${response.status}`);
+        }
+        const data = await response.json();
+
+        // Data from server is the source of truth
         finalStateUpdate = {
-            visitors: data?.visitors ?? mockVisitors,
-            users: data?.users ?? mockUsers,
-            companyInfo: data?.companyInfo ?? defaultCompanyInfo,
-            predefinedUnits: data?.predefinedUnits ?? mockUnits,
-            pendingChats: data?.pendingChats ?? [],
-            sessions: data?.sessions ?? {},
+            visitors: data.visitors ?? mockVisitors,
+            users: data.users ?? mockUsers,
+            companyInfo: data.companyInfo ?? defaultCompanyInfo,
+            predefinedUnits: data.predefinedUnits ?? mockUnits,
+            pendingChats: data.pendingChats ?? [],
+            sessions: data.sessions ?? {},
         };
+        
     } catch (error) {
-        console.error("Could not load or parse saved data, using mocks.", error);
+        console.error("Could not load data from server, falling back to local mocks.", error);
+        // Fallback to local mocks if API fails, this provides an offline mode
         finalStateUpdate = {
             visitors: mockVisitors,
             users: mockUsers,
@@ -1963,9 +1982,11 @@ function init() {
             predefinedUnits: mockUnits,
             pendingChats: [],
             sessions: {},
+            loginError: 'Failed to connect to server. Using sample data.'
         };
     }
 
+    // Session logic operates on the data we just fetched or mocked
     const tempState = { ...state, ...finalStateUpdate };
     const sessionId = sessionStorage.getItem('sessionId');
     const userId = sessionId ? tempState.sessions[sessionId] : null;
@@ -1992,7 +2013,7 @@ function init() {
             isAuthenticated: true,
             currentView: 'dashboard',
             currentUser: user,
-            loginError: '',
+            loginError: (finalStateUpdate as any).loginError || '',
             isApprovalModalOpen: shouldShowApprovalModal,
             isChatNotificationModalOpen: shouldShowChatModal,
             activeChatId: userActiveChatId,
@@ -2003,6 +2024,7 @@ function init() {
     
     setState({ ...finalStateUpdate, isLoadingData: false });
 }
+
 
 // Initial load
 init();
